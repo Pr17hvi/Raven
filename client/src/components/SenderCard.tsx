@@ -1,0 +1,278 @@
+import { useEffect, useRef, useState } from "react";
+
+import { socketActions } from "../services/socketActions";
+import { socketEvents } from "../services/socketEvents";
+import { Upload, File, Copy } from "lucide-react";
+import toast from "react-hot-toast";
+
+import type { TransferState } from "../services/transfer/TransferState";
+
+// 1. Declare the props interface to satisfy Landing.tsx type rules
+
+interface SenderCardProps {
+  disabled: boolean;
+  onSessionStart: (pin: string) => void;
+
+  createOffer: (sessionPin?: string) => Promise<void>;
+  connectionState: RTCPeerConnectionState;
+  dataChannelReady: boolean;
+  sendFiles: (files: File[]) => Promise<void>;
+  transfer: TransferState;
+  sessionMode: "idle" | "sender" | "receiver";
+}
+
+export default function SenderCard({
+  disabled,
+  onSessionStart,
+  createOffer,
+  connectionState,
+  dataChannelReady,
+  sendFiles,
+  transfer,
+  sessionMode,
+}: SenderCardProps) {
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [pin, setPin] = useState("------");
+  const [status, setStatus] = useState("Choose a file to start sharing");
+
+  const startedRef = useRef(false);
+
+  const progress =
+    transfer.fileSize === 0
+      ? 0
+      : (transfer.bytesTransferred / transfer.fileSize) * 100;
+
+  const pinRef = useRef(pin);
+
+  useEffect(() => {
+    if (!dataChannelReady || selectedFiles.length === 0 || startedRef.current) {
+      return;
+    }
+
+    startedRef.current = true;
+
+    sendFiles(selectedFiles);
+  }, [dataChannelReady, selectedFiles]);
+
+  // // to save state of the session in local storage so that if the user refreshes the page, we can restore the session.
+  // useEffect(() => {
+  //   const pendingSession = localStorage.getItem("raven_pending_sender");
+  //   if (pendingSession) {
+  //     const { name, size } = JSON.parse(pendingSession);
+
+  //     // Create a mock file object to restore the UI state cleanly
+  //     setSelectedFile({ name, size } as any);
+  //     setStatus("Restoring session...");
+
+  //     // Clean up storage so it doesn't loop infinitely
+  //     localStorage.removeItem("raven_pending_sender");
+
+  //     // Automatically trigger the session creation now that the page is stable
+  //     socketActions.createSession();
+  //   }
+  // }, []);
+
+  useEffect(() => {
+    // Fired when the backend returns a unique PIN for this session
+    const cleanupSessionCreated = socketEvents.onSessionCreated(({ pin }) => {
+      pinRef.current = pin;
+      setPin(pin);
+      setStatus("Ready! Share the PIN above with the receiver.");
+      onSessionStart(pin); // Notify parent component of the new session
+    });
+
+    // Fired when the receiver types PIN and joins the session.
+    const cleanupReceiverJoined = socketEvents.onReceiverJoined(() => {
+      setStatus("Receiver connected! Starting file transfer...");
+      createOffer(pinRef.current);
+    });
+
+    // Fired when the receiver disconnects from the session.
+    const cleanupPeerDisconnected = socketEvents.onPeerDisconnected(
+      ({ peerId }) => {
+        if (peerId === pinRef.current) {
+          setStatus("Receiver disconnected! Session ended.");
+        }
+      },
+    );
+
+    return () => {
+      cleanupSessionCreated();
+      cleanupReceiverJoined();
+      cleanupPeerDisconnected();
+    };
+  }, [onSessionStart, createOffer]);
+
+  // Mirror WebRTC native connection states back into the human-readable UI status block
+  useEffect(() => {
+    if (connectionState === "connecting") {
+      setStatus("Securing a direct link between devices...");
+    } else if (connectionState === "connected") {
+      setStatus("Connected! Sending file now...");
+    } else if (connectionState === "failed") {
+      setStatus("Connection dropped. Please refresh and try again.");
+    }
+  }, [connectionState]);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files?.length) return;
+
+    // Note: We use globalThis.File to clearly differentiate between JavaScript's native
+    // File binary object and Lucide's <File /> icon component.
+    const files = Array.from(e.target.files);
+    setSelectedFiles(files);
+
+    // // Save minimal file details to storage BEFORE asking the server for a session
+    // localStorage.setItem(
+    //   "raven_pending_sender",
+    //   JSON.stringify({ name: file.name, size: file.size })
+    // );
+
+    setStatus("Creating session...");
+
+    socketActions.createSession();
+  };
+
+  return (
+    <div
+      className={`rounded-3xl bg-white/5 backdrop-blur-xl border border-white/10 p-8 shadow-lg transition-all duration-300
+        ${disabled ? "opacity-30 pointer-events-none scale-95" : "hover:border-white/20 hover:-translate-y-1"}
+      `}
+    >
+      <h2 className="flex items-center gap-2 text-2xl font-semibold">
+        <Upload className="h-7 w-7 text-blue-500" />
+        Send
+      </h2>
+
+      {selectedFiles.length === 0 ? (
+        <>
+          <label
+            htmlFor="file"
+            className="mt-6 flex h-44 cursor-pointer items-center justify-center rounded-xl border-2 border-dashed border-zinc-700 transition hover:border-blue-500"
+          >
+            <div className="text-center">
+              <Upload className="mx-auto mb-3 h-10 w-10 text-zinc-400" />
+              <p className="text-lg font-medium">Choose files</p>
+              <p className="mt-2 text-sm text-zinc-400">Click here to browse</p>
+            </div>
+          </label>
+
+          <input
+            id="file"
+            type="file"
+            multiple
+            className="hidden"
+            disabled={disabled}
+            onChange={handleFileChange}
+          />
+        </>
+      ) : (
+        <>
+          <div className="mt-6 max-h-60 overflow-y-auto rounded-xl bg-zinc-800 p-4">
+            {selectedFiles.map((file) => (
+              <div
+                key={`${file.name}-${file.size}-${file.lastModified}`}
+                className="flex items-center gap-3 py-2"
+              >
+                <File className="h-6 w-6 text-blue-400 shrink-0" />
+
+                <div>
+                  <p className="font-medium break-all">{file.name}</p>
+                  <p className="mt-1 text-sm text-zinc-400">
+                    {(file.size / 1024 / 1024).toFixed(2)} MB
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-6 rounded-xl bg-zinc-800 p-5">
+            <p className="text-sm text-zinc-400">Share this PIN</p>
+            <div className="mt-2 flex items-center justify-between">
+              <span className="text-3xl font-bold tracking-[0.4em]">{pin}</span>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(pin);
+                  toast.custom(() => (
+                    <div className="rounded-xl border border-slate-700 bg-zinc-900 px-4 py-3 shadow-lg">
+                      <p className="font-medium text-white">
+                        PIN copied to clipboard!
+                      </p>
+                    </div>
+                  ));
+                }}
+                className="rounded-lg bg-white p-2 text-black transition hover:bg-zinc-200"
+                title="Click to copy PIN to clipboard"
+              >
+                <Copy size={18} />
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-6 rounded-xl bg-zinc-800 p-4">
+            <p className="text-sm text-zinc-400">Status</p>
+
+            <p
+              className={`mt-2 font-medium ${
+                // If the connection failed or was dropped, make the text red
+                connectionState === "failed" ||
+                status.includes("dropped") ||
+                status.includes("lost")
+                  ? "text-rose-500"
+                  : connectionState === "connected"
+                    ? "text-emerald-400"
+                    : "text-blue-400"
+              }`}
+            >
+              {status}
+            </p>
+
+            {/* Only display the file progress details if the connection is active and not canceled */}
+            {sessionMode === "sender" &&
+              transfer.fileSize > 0 &&
+              !status.includes("canceled") &&
+              connectionState !== "failed" && (
+                <>
+                  <div className="mt-5 flex items-center justify-between">
+                    <p className="font-medium break-all text-white">
+                      {transfer.fileName}
+                    </p>
+                    <span className="text-sm text-zinc-400">
+                      {progress.toFixed(1)}%
+                    </span>
+                  </div>
+
+                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-zinc-700">
+                    <div
+                      className="h-full rounded-full bg-blue-500 transition-all duration-150"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
+
+                  <div className="mt-2 flex justify-between text-sm text-zinc-400">
+                    <span>
+                      {(transfer.bytesTransferred / 1024 / 1024).toFixed(2)} MB
+                    </span>
+                    <span>
+                      {(transfer.fileSize / 1024 / 1024).toFixed(2)} MB
+                    </span>
+                  </div>
+
+                  <p className="mt-2 text-sm text-zinc-400">
+                    {(transfer.bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s
+                  </p>
+                </>
+              )}
+
+            {/* NEW: Explicit help text when the transfer is broken */}
+            {(status.includes("canceled") || connectionState === "failed") && (
+              <div className="mt-4 border-t border-zinc-700/50 pt-3 text-xs text-zinc-400">
+                <p>To try again, refresh the page.</p>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
